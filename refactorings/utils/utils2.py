@@ -20,6 +20,27 @@ def get_file_info(filename: str) -> FileInfo:
     return listener.file_info
 
 
+def get_objects(source_files: str) -> FileInfo:
+    objects = {}
+    for filename in source_files:
+        stream = FileStream(filename, encoding='utf8')
+        lexer = JavaLexer(stream)
+        token_stream = CommonTokenStream(lexer)
+        parser = JavaParser(token_stream)
+        tree = parser.compilationUnit()
+        listener = UtilsListener(filename)
+        walker = ParseTreeWalker()
+        walker.walk(listener, tree)
+
+        if not listener.package.name in objects:
+            objects[listener.package.name] = listener.objects_declaration
+        else:
+            for class_name in listener.objects_declaration:
+                objects[listener.package.name][class_name] = listener.objects_declaration[class_name]
+
+    return objects
+
+
 def get_program(source_files: list, print_status = False) -> Program:
     program = Program()
     for filename in source_files:

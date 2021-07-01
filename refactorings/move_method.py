@@ -1,5 +1,5 @@
 from antlr4.TokenStreamRewriter import TokenStreamRewriter
-from refactorings.utils.utils2 import get_program, Rewriter, get_filenames_in_dir, get_file_info
+from refactorings.utils.utils2 import get_program, Rewriter, get_filenames_in_dir, get_objects
 from refactorings.utils.utils_listener_fast import TokensInfo, SingleFileElement, Class
 import subprocess
 import os
@@ -19,6 +19,7 @@ class MoveMethodRefactoring:
 
     def do_refactor(self):
         program = get_program(self.source_filenames)
+        objects = get_objects(self.source_filenames)
         static = 0
 
         if self.class_name not in program.packages[self.package_name].classes or self.target_class_name not in \
@@ -31,6 +32,7 @@ class MoveMethodRefactoring:
         _sourceclass = program.packages[self.package_name].classes[self.class_name]
         _targetclass = program.packages[self.target_package_name].classes[self.target_class_name]
         _method = program.packages[self.package_name].classes[self.class_name].methods[self.method_key]
+        method_name = self.method_key[:self.method_key.find('(')]
 
         if _method.is_constructor:
             return False
@@ -55,42 +57,76 @@ class MoveMethodRefactoring:
         for token in exps:
             if token.text in _sourceclass.fields:
                 exp.append(token.tokenIndex)
-            # check that where this method is call
+
+        source_object_name = str.lower(self.class_name)
+        target_object_name = str.lower(self.target_class_name)
+
         for package_names in program.packages:
             package = program.packages[package_names]
             for class_ in package.classes:
                 _class = package.classes[class_]
+                import_status = False
                 for method_ in _class.methods:
                     __method = _class.methods[method_]
-                    for inv in __method.body_method_invocations:
-                        invc = __method.body_method_invocations[inv]
-                        method_name = self.method_key[:self.method_key.find('(')]
-                        if invc[0] == method_name:
-                            inv_tokens_info = TokensInfo(inv)
+                    for obj_or_class_ctx in __method.body_method_invocations:
+                        invc = __method.body_method_invocations[obj_or_class_ctx]
+                        try:
+                            obj_or_class_str = obj_or_class_ctx.children[0].children[0].getText()
+                            cond1 = objects[package_names][class_][method_[:method_.find('(')]].get(obj_or_class_str) == self.class_name
+                            cond2 = obj_or_class_str == self.class_name
+                        except:
+                            continue
+                        if invc[0] == method_name and (cond1 or cond2):
+                            inv_tokens_info = TokensInfo(obj_or_class_ctx)
                             if static == 0:
+                                Rewriter_.replace(inv_tokens_info, target_object_name)
+                            elif static == 1:
+                                Rewriter_.replace(inv_tokens_info, self.target_class_name)
+                            if not import_status:
+                                import_status = True
                                 class_token_info = TokensInfo(_class.body_context)
-                                Rewriter_.insert_after_start(class_token_info, self.target_class_name + " " + str.lower(
-                                    self.target_class_name) + "=" + "new " + self.target_class_name + "();")
-                                Rewriter_.apply()
-                            Rewriter_.insert_before_start(class_token_info,
-                                                          "import " + self.target_package_name + "." + self.target_class_name + ";")
-                            Rewriter_.replace(inv_tokens_info, self.target_class_name)
-                        Rewriter_.apply()
+                                class_modifier_token_info = TokensInfo(_class.modifiers_parser_contexts[0])
+                                if static == 0:
+                                    Rewriter_.insert_after_start(class_token_info,
+                                                                 '\nstatic ' + self.target_class_name + " " + target_object_name + "=" + "new " + self.target_class_name + "();")
+                                Rewriter_.insert_before_start(class_modifier_token_info, "import " + self.target_package_name + "." + self.target_class_name + ";\n")
+                            Rewriter_.apply()
+
+
 
         class_tokens_info = TokensInfo(_targetclass.parser_context)
         package_tokens_info = TokensInfo(program.packages[self.target_package_name].package_ctx)
         singlefileelement = SingleFileElement(_method.parser_context, _method.filename)
         token_stream_rewriter = TokenStreamRewriter(singlefileelement.get_token_stream())
 
+
+        source_body_class_token = TokensInfo(_sourceclass.body_context)
+        Rewriter_.insert_after_start(source_body_class_token, '\nstatic ' + self.target_class_name + " " + target_object_name + "=" + "new " + self.target_class_name + "();")
+        Rewriter_.apply()
+        for method_ in _sourceclass.methods:
+            __method = _sourceclass.methods[method_]
+            for inv in __method.body_method_invocations_without_typename:
+                invc = __method.body_method_invocations_without_typename[inv]
+                if inv.getText() == self.class_name:
+                    for j in invc:
+                        if j.IDENTIFIER().getText() == method_name:
+                            i_tokens = TokensInfo(j)
+                            if static == 0:
+                                Rewriter_.insert_before_start(i_tokens, target_object_name + ".")
+                            elif static == 1:
+                                Rewriter_.insert_before_start(i_tokens, self.target_class_name + ".")
+                            Rewriter_.apply()
+
+
+
         # insert class name of source file before used attributes inside the moving method
         for index in exp:
-            token_stream_rewriter.insertBeforeIndex(index=index, text=str.lower(self.class_name) + ".")
+            token_stream_rewriter.insertBeforeIndex(index=index, text=source_object_name + ".")
 
         for inv in _method.body_method_invocations:
             if inv.getText() == self.target_class_name:
                 inv_tokens_info_target = TokensInfo(inv)
-                token_stream_rewriter.replaceRange(from_idx=inv_tokens_info_target.start,
-                                                   to_idx=inv_tokens_info_target.stop + 1, text=" ")
+                token_stream_rewriter.replaceRange(from_idx=inv_tokens_info_target.start, to_idx=inv_tokens_info_target.stop + 1, text=" ")
 
         # insert class name of source file before used methods inside the moving method
         for i in _method.body_method_invocations_without_typename:
@@ -98,36 +134,27 @@ class MoveMethodRefactoring:
                 ii = _method.body_method_invocations_without_typename[i]
                 for j in ii:
                     i_tokens = TokensInfo(j)
-                    token_stream_rewriter.insertBeforeIndex(index=i_tokens.start, text=str.lower(self.class_name) + ".")
+                    token_stream_rewriter.insertBeforeIndex(index=i_tokens.start, text=target_object_name+ ".")
 
-        # pass object of source class to method
+        # create source class object in target class to use source fields
+        target_body_class_token = TokensInfo(_targetclass.body_context)
         if len(_method.body_method_invocations_without_typename) or exp:
-            if param_tokens_info.start is not None:
-                token_stream_rewriter.insertBeforeIndex(param_tokens_info.start,
-                                                        text=self.class_name + " " + str.lower(self.class_name) + ",")
-            else:
-                token_stream_rewriter.insertBeforeIndex(method_declaration_info.stop,
-                                                        text=self.class_name + " " + str.lower(self.class_name))
+            if target_body_class_token.start is not None:
+                Rewriter_.insert_after_start(target_body_class_token, '\nstatic ' + self.class_name + " " + source_object_name + "=" + "new " + self.class_name + "();")
 
+
+        # move main method
         strofmethod = token_stream_rewriter.getText(program_name=token_stream_rewriter.DEFAULT_PROGRAM_NAME,
                                                     start=tokens_info.start,
                                                     stop=tokens_info.stop)
-
         Rewriter_.insert_before(tokens_info=class_tokens_info, text=strofmethod)
+
         # importing proprate package when method is moved to some other package
         if self.target_package_name != self.package_name:
             target_class_modifier_token = TokensInfo(_targetclass.modifiers_parser_contexts[0])
-            Rewriter_.insert_before_start(
-                target_class_modifier_token,
-                "import " + self.package_name + "." + self.class_name + ";\n"
-            )
+            Rewriter_.insert_before_start(target_class_modifier_token,"import " + self.package_name + "." + self.class_name + ";\n")
+            Rewriter_.apply()
 
-        # add imported class in destination file
-        file_info = get_file_info(_sourceclass.filename)
-        for imported_class in file_info.all_imports:
-            target_class_modifier_token = TokensInfo(_targetclass.modifiers_parser_contexts[0])
-            Rewriter_.insert_before_start(target_class_modifier_token,
-                "import " + imported_class.package_name + "." + (imported_class.class_name if hasattr(imported_class, 'class_name') else '*') + ";\n")
 
         Rewriter_.replace(tokens_info, "")
         Rewriter_.apply()
@@ -140,11 +167,9 @@ class MoveMethodRefactoring:
 
 
 if __name__ == "__main__":
-    #mylist = get_filenames_in_dir('/home/mohamad/projects/compiler/TheShitTest/src')
-    mylist = get_filenames_in_dir('/home/mohamad/projects/benchmark_projects/JSON/src/main/java/org/json')
+    mylist = get_filenames_in_dir('/path/to/project')
     print("Testing move_method...")
-    #move_method = MoveMethodRefactoring(mylist, "PackageA", "A", "A_method_1()", "B", "PackageA")
-    move_method = MoveMethodRefactoring(mylist, "org.json", "Cookie", "escape(String)", "CookieList", "org.json")
+    move_method = MoveMethodRefactoring(mylist, "PackageA", "A", "A_method_1()", "B", "PackageB")
     if move_method.do_refactor():
         print("Success!")
     else:
